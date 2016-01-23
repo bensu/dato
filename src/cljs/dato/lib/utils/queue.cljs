@@ -21,6 +21,10 @@
 (defn enqueue! [queue-atom & items]
   (swap! queue-atom (fn [q] (apply conj q items))))
 
+;; TODO: since add-watch has no return value, add-consumer could
+;; return consumer-id, so that (add-consumer queue handler) returns
+;; the generated (utils/unique-id)
+
 (defn add-consumer
   "Takes an optional consumer id for removing the consumer later. Will return
    consumer id. Handler will be given the queue atom, it's up to the consumer to
