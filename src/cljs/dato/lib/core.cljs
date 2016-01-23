@@ -1,5 +1,6 @@
 (ns dato.lib.core
   (:require [cljs.core.async :as async :refer [put! chan <!]]
+            [cljs.pprint :refer [pprint]]
             [cognitect.transit :as transit]
             [datascript :as d]
             [datascript.core :as dc]
@@ -249,7 +250,6 @@
   @(:ss dato))
 
 (defn start-loop! [dato additional-context]
-  (println "START LOOP")
   (let [dato-take (get-in dato [:comms :dato-take])
         conn            (get-in dato [:conn])
         ;; TODO: This is messy, clean up once api and ss are merged
@@ -272,48 +272,51 @@
     ;; '--> use a mult-tap so that plugins can tap and do what they want
     ;; 2. Transactions needing history-listener-specific metadata (plugging it in now becomes difficult)
     (d/listen! conn key update-history!)
-    (println "!")
     (go
       (try
         (loop []
-          (alt!
-            dato-take ([{:keys [sender event data] :as payload}]
-                       (cond
-                         ;; Special-case waiting on https://github.com/tonsky/datascript/issues/76
-                         ;; Can eliminate this branch afterwards
-                         (= :server/database-transacted event)
-                         (let [previous-state @conn]
-                           (def f-tx data)
-                           ;; This is the abstraction not yet supported
-                           ;; (two-phase commit, plus intermediate
-                           ;; processing)
-                           (web-peer/handle-transaction conn data)
-                           (con/effect! context previous-state @conn payload))
-                         :else
-                         (let [previous-state @conn
-                               tx-data        (con/transition @conn payload)
-                               tx-meta        (meta tx-data)
-                               full-tx-meta   (-> (if tx-meta
-                                                    tx-meta
-                                                    {:tx/transient? true})
-                                                  (update-in [:tx/intent] (fn [intent]
-                                                                            (or intent event))))]
-                           (when-not (:tx/transient? full-tx-meta)
-                             (js/console.log "\tevent: " (pr-str event))
-                             (js/console.log "\ttx-data: " (pr-str tx-data))
-                             (js/console.log "\ttx-meta: " (pr-str full-tx-meta)))
-                           (cljs.pprint/pprint tx-data)
-                           (cljs.pprint/pprint full-tx-meta)
-                           (cljs.pprint/pprint (or (:tx/broadcast? full-tx-meta)
-                                                   (:tx/persist? full-tx-meta)))
-                           (if tx-data
-                             (if (or (:tx/broadcast? full-tx-meta)
-                                     (:tx/persist? full-tx-meta))
-                               (web-peer/transact conn tx-data full-tx-meta)
-                               (d/transact! conn tx-data full-tx-meta))
-                             (update-history! {:tx-meta full-tx-meta}))
-                           (con/effect! context previous-state @conn payload)))
-                       (recur))))
+          (alt! dato-take
+                ([{:keys [sender event data] :as payload}]
+                 (cond
+                   ;; Special-case waiting on https://github.com/tonsky/datascript/issues/76
+                   ;; Can eliminate this branch afterwards
+                   (= :server/database-transacted event)
+                   (let [previous-state @conn]
+                     (def f-tx data)
+                     ;; This is the abstraction not yet supported
+                     ;; (two-phase commit, plus intermediate
+                     ;; processing)
+                     (web-peer/handle-transaction conn data)
+                     (con/effect! context previous-state @conn payload))
+                   ;; Apply the transaction
+                   :else
+                   (let [previous-state @conn
+                         tx-data        (con/transition @conn payload)
+                         tx-meta        (meta tx-data)
+                         full-tx-meta   (-> (or tx-meta {:tx/transient? true})
+                                            (update :tx/intent (fn [intent]
+                                                                 (or intent event))))
+                         verbose? true]
+                     (when verbose?
+                       (when-not (:tx/transient? full-tx-meta)
+                         (js/console.log "\tevent: " (pr-str event))
+                         (js/console.log "\ttx-data: " (pr-str tx-data))
+                         (js/console.log "\ttx-meta: " (pr-str full-tx-meta)))
+                       (pprint tx-data)
+                       (pprint full-tx-meta)
+                       (pprint (or (:tx/broadcast? full-tx-meta)
+                                   (:tx/persist? full-tx-meta))))
+                     (cond
+                       ;; Nothing to do but change the meta
+                       (nil? tx-data) (update-history! {:tx-meta full-tx-meta})
+
+                       ;; Server side-effects
+                       (or (:tx/broadcast? full-tx-meta) (:tx/persist? full-tx-meta))
+                       (web-peer/transact conn tx-data full-tx-meta)
+
+                       :else (d/transact! conn tx-data full-tx-meta))
+                     (con/effect! context previous-state @conn payload)))
+                 (recur))))
         (catch js/Error e
           (js/console.error "Error in go loop" e))))))
 
